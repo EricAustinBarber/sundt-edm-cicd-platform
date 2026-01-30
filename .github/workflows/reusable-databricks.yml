@@ -1,0 +1,185 @@
+name: reusable-databricks
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "Which lifecycle to run: ci-dev | ci-test | cd-prod"
+        required: true
+        type: string
+      bundle_path:
+        description: "Path to the Databricks Asset Bundle (contains databricks.yml)"
+        required: true
+        type: string
+      target:
+        description: "Databricks bundle target name (e.g., dev, test, prod)"
+        required: true
+        type: string
+      environment_name:
+        description: "GitHub Environment name to apply for secrets/approvals (e.g., DataBricks-Test)"
+        required: true
+        type: string
+      artifact_name:
+        description: "Artifact name for build outputs (if applicable)"
+        required: false
+        default: "dw_bundle_artifact"
+        type: string
+      run_asset_validation:
+        description: "Run metadata-driven asset validation job after deploy (ci-test recommended)"
+        required: false
+        default: true
+        type: boolean
+      asset_validation_notebook_path:
+        description: "Databricks notebook path for asset validation driver"
+        required: false
+        default: "/Repos/ci/asset_validation_driver"
+        type: string
+      asset_validation_cluster_id_secret:
+        description: "Name of the GitHub secret containing the cluster id used for validations"
+        required: false
+        default: "DATABRICKS_VALIDATION_CLUSTER_ID"
+        type: string
+      promote_artifact_only:
+        description: "If true, skip build and only deploy a previously-built artifact (cd-prod use-case)"
+        required: false
+        default: false
+        type: boolean
+
+    secrets:
+      DATABRICKS_HOST:
+        required: true
+      DATABRICKS_TOKEN:
+        required: true
+      # Optional: if your deploy uses OIDC/Azure auth, you can extend this reusable workflow later.
+      # Azure credentials are intentionally not defined here to avoid coupling.
+
+jobs:
+  databricks:
+    name: ${{ inputs.mode }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      BUNDLE_PATH: ${{ inputs.bundle_path }}
+      TARGET: ${{ inputs.target }}
+      ARTIFACT_NAME: ${{ inputs.artifact_name }}
+      MODE: ${{ inputs.mode }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          # Databricks CLI includes Asset Bundle commands in modern versions
+          pip install databricks-cli databricks-sdk
+          sudo apt-get update
+          sudo apt-get install -y jq zip
+
+      - name: Validate inputs
+        run: |
+          case "$MODE" in
+            ci-dev|ci-test|cd-prod) ;;
+            *) echo "Invalid mode: $MODE (expected ci-dev|ci-test|cd-prod)"; exit 2;;
+          esac
+          if [ ! -f "$BUNDLE_PATH/databricks.yml" ] && [ ! -f "$BUNDLE_PATH/databricks.yaml" ]; then
+            echo "Could not find databricks.yml under bundle_path: $BUNDLE_PATH"
+            exit 2
+          fi
+
+      - name: Bundle validate
+        run: |
+          cd "$BUNDLE_PATH"
+          databricks bundle validate --target "$TARGET"
+
+      # Build/package step (optional)
+      - name: Package bundle content (artifact)
+        if: ${{ inputs.promote_artifact_only == false }}
+        run: |
+          mkdir -p dist
+          # Package the bundle directory as-is (teams can change this later to a curated bundle package)
+          zip -r "dist/${ARTIFACT_NAME}.zip" "$BUNDLE_PATH" -x "*.git*"
+
+      - name: Upload artifact
+        if: ${{ inputs.promote_artifact_only == false }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: dist/${{ inputs.artifact_name }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      # Deploy rules:
+      # - ci-dev: optional deploy (defaults to skip)
+      # - ci-test: deploy required
+      # - cd-prod: deploy required, but typically promote_artifact_only=true and artifact comes from release process
+      - name: Bundle deploy
+        if: ${{ inputs.mode != 'ci-dev' }}
+        run: |
+          cd "$BUNDLE_PATH"
+          databricks bundle deploy --target "$TARGET" --no-prompt
+
+      - name: Asset validation (metadata-driven)
+        if: ${{ inputs.mode == 'ci-test' && inputs.run_asset_validation }}
+        env:
+          # Secrets cannot be dynamically dereferenced by name; we keep a fixed secret name in v1.
+          # If you need multiple cluster IDs, fork this workflow per repo or standardize on one secret name.
+          DATABRICKS_VALIDATION_CLUSTER_ID: ${{ secrets.DATABRICKS_VALIDATION_CLUSTER_ID }}
+        run: |
+          if [ -z "$DATABRICKS_VALIDATION_CLUSTER_ID" ]; then
+            echo "Missing secret: DATABRICKS_VALIDATION_CLUSTER_ID in environment: ${{ inputs.environment_name }}"
+            exit 2
+          fi
+
+          cat > run-asset-validation.json <<EOF
+          {
+            "run_name": "asset-validation-${{ github.sha }}",
+            "existing_cluster_id": "${DATABRICKS_VALIDATION_CLUSTER_ID}",
+            "notebook_task": {
+              "notebook_path": "${{ inputs.asset_validation_notebook_path }}",
+              "base_parameters": {
+                "env": "test",
+                "commit_sha": "${{ github.sha }}"
+              }
+            }
+          }
+          EOF
+
+          databricks runs submit --json-file run-asset-validation.json > submit.out
+          RUN_ID=$(jq -r '.run_id' submit.out)
+          echo "Submitted Databricks run_id=$RUN_ID"
+
+          # Poll for completion
+          while true; do
+            STATE=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.life_cycle_state')
+            RESULT=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.result_state // empty')
+            echo "life_cycle_state=$STATE result_state=$RESULT"
+            if [ "$STATE" = "TERMINATED" ] || [ "$STATE" = "INTERNAL_ERROR" ] || [ "$STATE" = "SKIPPED" ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          # Fail workflow unless SUCCESS
+          FINAL=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.result_state')
+          if [ "$FINAL" != "SUCCESS" ]; then
+            echo "Asset validation failed (result_state=$FINAL). See Databricks run_id=$RUN_ID."
+            exit 1
+          fi
+
+      - name: Post-deploy smoke (prod)
+        if: ${{ inputs.mode == 'cd-prod' }}
+        run: |
+          echo "Post-deploy smoke checks placeholder."
+          echo "Recommended: read a small set of critical tables, verify job definitions exist, verify no critical monitors/alerts firing."
+
