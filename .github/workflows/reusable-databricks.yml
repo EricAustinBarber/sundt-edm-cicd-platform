@@ -242,7 +242,7 @@ jobs:
           fi
 
       - name: Post-deploy smoke (flagged)
-        if: ${{ inputs.run_post_deploy_smoke }}
+        if: ${{ inputs.run_post_deploy_smoke && (inputs.mode == 'ci-test' || inputs.mode == 'cd-prod') }}
         env:
           DATABRICKS_VALIDATION_CLUSTER_ID: ${{ secrets.DATABRICKS_VALIDATION_CLUSTER_ID }}
         run: |
