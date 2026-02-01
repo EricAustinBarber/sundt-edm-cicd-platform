@@ -145,10 +145,41 @@ jobs:
       # - ci-test: deploy required
       # - cd-prod: deploy required, but typically promote_artifact_only=true and artifact comes from release process
       - name: Bundle deploy
-        if: ${{ inputs.mode != 'ci-dev' }}
+        # Demo-friendly: deploy for ci-dev, ci-test, and cd-prod
         run: |
           cd "$BUNDLE_PATH"
           databricks bundle deploy --target "$TARGET" --no-prompt
+
+      - name: Debug: list deployed workspace files
+        run: |
+          cd "$BUNDLE_PATH"
+          echo "Bundle summary:"
+          databricks bundle summary --target "$TARGET" || true
+
+          # If summary format changes, fall back to known root_path from config
+          ROOT_PATH=$(databricks bundle summary --target "$TARGET" 2>/dev/null | awk '/Path:/{print $2; exit}')
+          if [ -z "$ROOT_PATH" ]; then
+            echo "Could not parse root path from bundle summary; using expected workspace root_path from targets."
+            # NOTE: keep this aligned with your databricks.yml targets.root_path
+            case "$TARGET" in
+              dev)  ROOT_PATH="/Workspace/Shared/DataFlow/example/dev/sundt_example_bundle" ;;
+              test) ROOT_PATH="/Workspace/Shared/DataFlow/example/test/sundt_example_bundle" ;;
+              prod) ROOT_PATH="/Workspace/Shared/DataFlow/example/prod/sundt_example_bundle" ;;
+              *)    ROOT_PATH="" ;;
+            esac
+          fi
+
+          echo "Resolved ROOT_PATH=$ROOT_PATH"
+          if [ -n "$ROOT_PATH" ]; then
+            echo "Listing workspace root:"
+            databricks workspace list "$ROOT_PATH" || true
+            echo "Listing files/:"
+            databricks workspace list "$ROOT_PATH/files" || true
+            echo "Listing files/resources/notebooks:"
+            databricks workspace list "$ROOT_PATH/files/resources/notebooks" || true
+          fi
+
+
 
       - name: Asset validation (metadata-driven)
         if: ${{ inputs.mode == 'ci-test' && inputs.run_asset_validation }}
