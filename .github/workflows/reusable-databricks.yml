@@ -60,7 +60,9 @@ jobs:
     environment: ${{ inputs.environment_name }}
     permissions:
       contents: read
-      id-token: write
+      # Optional: if your deploy uses OIDC/Azure auth, you can extend this reusable workflow later.
+      # Azure credentials are intentionally not defined here to avoid coupling.
+      # id-token: write
     env:
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
