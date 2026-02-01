@@ -85,10 +85,16 @@ jobs:
       - name: Install tooling
         run: |
           python -m pip install --upgrade pip
-          # Databricks CLI includes Asset Bundle commands in modern versions
-          pip install databricks-cli databricks-sdk
+          # Optional: only keep databricks-sdk if you actually use it elsewhere
+          pip install databricks-sdk
+
+          # Install the NEW Databricks CLI (supports `databricks bundle ...`)
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+          databricks version
+
           sudo apt-get update
           sudo apt-get install -y jq zip
+
 
       - name: Validate inputs
         run: |
