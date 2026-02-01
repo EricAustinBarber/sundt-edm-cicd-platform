@@ -58,13 +58,14 @@ on:
         default: "text"
         type: string
 
+      # Job/Notebook smoke (compute plane)
       run_post_deploy_smoke:
-        description: "If true, run a smoke test after deploy"
+        description: "If true, run a job/notebook smoke test after deploy (compute plane)."
         required: false
         default: false
         type: boolean
       smoke_mode:
-        description: "How to run smoke tests: notebook | bundle-run"
+        description: "How to run job/notebook smoke tests: notebook | bundle-run"
         required: false
         default: "notebook"
         type: string
@@ -79,12 +80,33 @@ on:
         default: ""
         type: string
 
+      # SQL Warehouse smoke (serving plane)
+      run_sql_smoke:
+        description: "If true, run SQL smoke tests against a Databricks SQL Warehouse after deploy."
+        required: false
+        default: false
+        type: boolean
+      sql_warehouse_id_secret:
+        description: "Name of the GitHub secret containing the SQL Warehouse ID."
+        required: false
+        default: "DATABRICKS_SQL_WAREHOUSE_ID"
+        type: string
+      sql_smoke_queries:
+        description: |
+          "One SQL statement per line to execute as post-deploy smoke (examples: SELECT 1; SHOW SCHEMAS; SELECT count(*) FROM ...)."
+        required: false
+        default: |
+          SELECT 1
+        type: string
+
     secrets:
       DATABRICKS_HOST:
         required: true
       DATABRICKS_TOKEN:
         required: true
       DATABRICKS_VALIDATION_CLUSTER_ID:
+        required: false
+      DATABRICKS_SQL_WAREHOUSE_ID:
         required: false
 
 jobs:
@@ -221,6 +243,7 @@ jobs:
           python - <<'PY'
           import os, time, sys
           from databricks.sdk import WorkspaceClient
+          from databricks.sdk.errors.platform import NotFound
           from databricks.sdk.service import jobs
 
           cluster_id = os.environ["DATABRICKS_VALIDATION_CLUSTER_ID"]
@@ -229,6 +252,13 @@ jobs:
           commit_sha = os.environ["COMMIT_SHA"]
 
           w = WorkspaceClient()
+
+          # Fail fast with a clearer error if the cluster id is wrong for this workspace.
+          try:
+              w.clusters.get(cluster_id)
+          except NotFound:
+              print(f"Cluster '{cluster_id}' does not exist in this workspace. Check GitHub Environment secrets for {env_name}.", file=sys.stderr)
+              raise
 
           run_name = f"asset-validation-{commit_sha}"
           task = jobs.SubmitTask(
@@ -263,8 +293,8 @@ jobs:
           print("Asset validation SUCCESS")
           PY
 
-      - name: Post-deploy smoke (flagged)
-        if: ${{ inputs.run_post_deployment_tests && inputs.run_post_deploy_smoke && (inputs.mode == 'ci-test' || inputs.mode == 'cd-prod') }}
+      - name: Post-deploy smoke (job/notebook, compute plane)
+        if: ${{ inputs.run_post_deployment_tests && inputs.run_post_deploy_smoke }}
         env:
           DATABRICKS_VALIDATION_CLUSTER_ID: ${{ secrets.DATABRICKS_VALIDATION_CLUSTER_ID }}
           SMOKE_MODE: ${{ inputs.smoke_mode }}
@@ -301,6 +331,7 @@ jobs:
           python - <<'PY'
           import os, time, sys
           from databricks.sdk import WorkspaceClient
+          from databricks.sdk.errors.platform import NotFound
           from databricks.sdk.service import jobs
 
           cluster_id = os.environ["DATABRICKS_VALIDATION_CLUSTER_ID"]
@@ -309,6 +340,13 @@ jobs:
           commit_sha = os.environ["COMMIT_SHA"]
 
           w = WorkspaceClient()
+
+          # Fail fast with a clearer error if the cluster id is wrong for this workspace.
+          try:
+              w.clusters.get(cluster_id)
+          except NotFound:
+              print(f"Cluster '{cluster_id}' does not exist in this workspace. Check GitHub Environment secrets for {env_name}.", file=sys.stderr)
+              raise
 
           run_name = f"post-deploy-smoke-{commit_sha}"
           task = jobs.SubmitTask(
@@ -341,4 +379,92 @@ jobs:
               sys.exit(1)
 
           print("Smoke SUCCESS")
+          PY
+
+      - name: Post-deploy smoke (SQL Warehouse, serving plane)
+        if: ${{ inputs.run_post_deployment_tests && inputs.run_sql_smoke }}
+        env:
+          DATABRICKS_SQL_WAREHOUSE_ID: ${{ secrets.DATABRICKS_SQL_WAREHOUSE_ID }}
+          SQL_SMOKE_QUERIES: ${{ inputs.sql_smoke_queries }}
+          ENV_NAME: ${{ inputs.target }}
+        run: |
+          if [ -z "$DATABRICKS_SQL_WAREHOUSE_ID" ]; then
+            echo "Missing secret: DATABRICKS_SQL_WAREHOUSE_ID in environment: ${{ inputs.environment_name }}"
+            exit 2
+          fi
+
+          python - <<'PY'
+          import os, time, sys
+          from databricks.sdk import WorkspaceClient
+          from databricks.sdk.errors.platform import NotFound
+
+          warehouse_id = os.environ["DATABRICKS_SQL_WAREHOUSE_ID"]
+          env_name = os.environ.get("ENV_NAME", "unknown")
+
+          raw = os.environ.get("SQL_SMOKE_QUERIES", "SELECT 1")
+          queries = [q.strip() for q in raw.splitlines() if q.strip()]
+
+          w = WorkspaceClient()
+
+          # Ensure warehouse exists, and try to start it if not running.
+          try:
+              wh = w.warehouses.get(warehouse_id)
+          except NotFound:
+              print(f"SQL Warehouse '{warehouse_id}' does not exist in this workspace. Check GitHub Environment secrets for {env_name}.", file=sys.stderr)
+              raise
+
+          state = getattr(wh, "state", None)
+          state_name = state.name if state else None
+          print(f"Warehouse state={state_name}")
+
+          if state_name and state_name != "RUNNING":
+              print("Starting warehouse...")
+              w.warehouses.start(warehouse_id)
+
+              # Poll for RUNNING (up to ~10 minutes)
+              deadline = time.time() + 600
+              while time.time() < deadline:
+                  wh = w.warehouses.get(warehouse_id)
+                  state = getattr(wh, "state", None)
+                  state_name = state.name if state else None
+                  print(f"Warehouse state={state_name}")
+                  if state_name == "RUNNING":
+                      break
+                  time.sleep(10)
+
+              if state_name != "RUNNING":
+                  print(f"Warehouse did not reach RUNNING state (last_state={state_name}).", file=sys.stderr)
+                  sys.exit(1)
+
+          def wait_statement(statement_id: str, timeout_s: int = 300):
+              deadline = time.time() + timeout_s
+              while True:
+                  resp = w.statement_execution.get_statement(statement_id)
+                  status = resp.status
+                  state = status.state.name if status and status.state else None
+                  print(f"statement_id={statement_id} state={state}")
+                  if state in ("SUCCEEDED", "FAILED", "CANCELED", "CLOSED"):
+                      return resp
+                  if time.time() > deadline:
+                      raise TimeoutError(f"Timed out waiting for statement {statement_id} (last_state={state})")
+                  time.sleep(2)
+
+          # Execute each statement and require success.
+          for i, q in enumerate(queries, start=1):
+              print(f"\n--- SQL smoke [{i}/{len(queries)}] ---\n{q}\n")
+              exec_resp = w.statement_execution.execute_statement(
+                  warehouse_id=warehouse_id,
+                  statement=q,
+                  wait_timeout="0s",  # async; we poll
+              )
+              stmt_id = exec_resp.statement_id
+              final = wait_statement(stmt_id, timeout_s=300)
+              status = final.status
+              state = status.state.name if status and status.state else None
+              if state != "SUCCEEDED":
+                  msg = status.error.message if status and status.error else "Unknown error"
+                  print(f"SQL smoke FAILED: state={state} error={msg}", file=sys.stderr)
+                  sys.exit(1)
+
+          print("\nSQL smoke SUCCESS")
           PY
