@@ -45,6 +45,38 @@ on:
         default: false
         type: boolean
 
+      run_post_deployment_tests:
+        description: "Run post-deploy tests (summary + optional smoke)."
+        required: false
+        default: false
+        type: boolean
+      post_deploy_summary_output:
+        description: "Output format for databricks bundle summary: text | json | both"
+        required: false
+        default: "text"
+        type: string
+      run_post_deploy_smoke:
+        description: "If true, run a smoke test after deploy"
+        required: false
+        default: false
+        type: boolean
+      smoke_mode:
+        description: "How to run smoke tests: notebook | bundle-run"
+        required: false
+        default: "notebook"
+        type: string
+      smoke_notebook_path:
+        description: "Notebook path used for smoke (when smoke_mode=notebook)"
+        required: false
+        default: ""
+        type: string
+      smoke_job_key:
+        description: "Job key to run via databricks bundle run (when smoke_mode=bundle-run)"
+        required: false
+        default: ""
+        type: string
+
+
     secrets:
       DATABRICKS_HOST:
         required: true
@@ -140,21 +172,34 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # Deploy rules:
-      # - ci-dev: optional deploy (defaults to skip)
-      # - ci-test: deploy required
-      # - cd-prod: deploy required, but typically promote_artifact_only=true and artifact comes from release process
       - name: Bundle deploy
-        # Demo-friendly: deploy for ci-dev, ci-test, and cd-prod
         run: |
           cd "$BUNDLE_PATH"
           databricks bundle deploy --target "$TARGET" --auto-approve
 
+      - name: Post-deploy verification (bundle summary)
+        if: ${{ inputs.run_post_deployment_tests }}
+        run: |
+          cd "$BUNDLE_PATH"
+
+          case "${{ inputs.post_deploy_summary_output }}" in
+            json)
+              databricks bundle summary --target "$TARGET" --output json > post_deploy_summary.json
+              echo "Wrote post_deploy_summary.json"
+              ;;
+            both)
+              databricks bundle summary --target "$TARGET"
+              databricks bundle summary --target "$TARGET" --output json > post_deploy_summary.json
+              echo "Wrote post_deploy_summary.json"
+              ;;
+            *)
+              databricks bundle summary --target "$TARGET"
+              ;;
+          esac
+
       - name: Asset validation (metadata-driven)
         if: ${{ inputs.mode == 'ci-test' && inputs.run_asset_validation }}
         env:
-          # Secrets cannot be dynamically dereferenced by name; we keep a fixed secret name in v1.
-          # If you need multiple cluster IDs, fork this workflow per repo or standardize on one secret name.
           DATABRICKS_VALIDATION_CLUSTER_ID: ${{ secrets.DATABRICKS_VALIDATION_CLUSTER_ID }}
         run: |
           if [ -z "$DATABRICKS_VALIDATION_CLUSTER_ID" ]; then
@@ -169,7 +214,7 @@ jobs:
             "notebook_task": {
               "notebook_path": "${{ inputs.asset_validation_notebook_path }}",
               "base_parameters": {
-                "env": "test",
+                "env": "${TARGET}",
                 "commit_sha": "${{ github.sha }}"
               }
             }
@@ -180,7 +225,6 @@ jobs:
           RUN_ID=$(jq -r '.run_id' submit.out)
           echo "Submitted Databricks run_id=$RUN_ID"
 
-          # Poll for completion
           while true; do
             STATE=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.life_cycle_state')
             RESULT=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.result_state // empty')
@@ -191,16 +235,56 @@ jobs:
             sleep 10
           done
 
-          # Fail workflow unless SUCCESS
           FINAL=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.result_state')
           if [ "$FINAL" != "SUCCESS" ]; then
             echo "Asset validation failed (result_state=$FINAL). See Databricks run_id=$RUN_ID."
             exit 1
           fi
 
-      - name: Post-deploy smoke (prod)
-        if: ${{ inputs.mode == 'cd-prod' }}
+      - name: Post-deploy smoke (flagged)
+        if: ${{ inputs.run_post_deploy_smoke }}
+        env:
+          DATABRICKS_VALIDATION_CLUSTER_ID: ${{ secrets.DATABRICKS_VALIDATION_CLUSTER_ID }}
         run: |
-          echo "Post-deploy smoke checks placeholder."
-          echo "Recommended: read a small set of critical tables, verify job definitions exist, verify no critical monitors/alerts firing."
+          if [ -z "${{ inputs.smoke_notebook_path }}" ]; then
+            echo "smoke_notebook_path is empty."
+            exit 2
+          fi
+          if [ -z "$DATABRICKS_VALIDATION_CLUSTER_ID" ]; then
+            echo "Missing secret: DATABRICKS_VALIDATION_CLUSTER_ID"
+            exit 2
+          fi
 
+          cat > run-smoke.json <<EOF
+          {
+            "run_name": "post-deploy-smoke-${{ github.sha }}",
+            "existing_cluster_id": "${DATABRICKS_VALIDATION_CLUSTER_ID}",
+            "notebook_task": {
+              "notebook_path": "${{ inputs.smoke_notebook_path }}",
+              "base_parameters": {
+                "env": "${TARGET}",
+                "commit_sha": "${{ github.sha }}"
+              }
+            }
+          }
+          EOF
+
+          databricks runs submit --json-file run-smoke.json > smoke_submit.out
+          RUN_ID=$(jq -r '.run_id' smoke_submit.out)
+          echo "Submitted smoke run_id=$RUN_ID"
+
+          while true; do
+            STATE=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.life_cycle_state')
+            RESULT=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.result_state // empty')
+            echo "life_cycle_state=$STATE result_state=$RESULT"
+            if [ "$STATE" = "TERMINATED" ] || [ "$STATE" = "INTERNAL_ERROR" ] || [ "$STATE" = "SKIPPED" ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          FINAL=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.result_state')
+          if [ "$FINAL" != "SUCCESS" ]; then
+            echo "Smoke failed (result_state=$FINAL). See Databricks run_id=$RUN_ID."
+            exit 1
+          fi
