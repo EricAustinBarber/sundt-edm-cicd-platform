@@ -85,16 +85,21 @@ jobs:
       - name: Install tooling
         run: |
           python -m pip install --upgrade pip
-          # Optional: only keep databricks-sdk if you actually use it elsewhere
+          # DO NOT install legacy databricks-cli (it overrides the `databricks` command)
           pip install databricks-sdk
-
-          # Install the NEW Databricks CLI (supports `databricks bundle ...`)
-          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
-          databricks version
 
           sudo apt-get update
           sudo apt-get install -y jq zip
 
+          # Install the NEW Databricks CLI (supports `databricks bundle ...`)
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+
+          echo "Databricks CLI path:"
+          which databricks
+          echo "Databricks CLI version:"
+          databricks version
+          echo "Databricks bundle help:"
+          databricks bundle -h
 
       - name: Validate inputs
         run: |
@@ -106,6 +111,12 @@ jobs:
             echo "Could not find databricks.yml under bundle_path: $BUNDLE_PATH"
             exit 2
           fi
+
+      - name: Sanity check Databricks CLI
+        run: |
+          which databricks
+          databricks version
+          databricks bundle -h
 
       - name: Bundle validate
         run: |
