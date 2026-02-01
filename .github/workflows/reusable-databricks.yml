@@ -24,6 +24,7 @@ on:
         required: false
         default: "dw_bundle_artifact"
         type: string
+
       run_asset_validation:
         description: "Run metadata-driven asset validation job after deploy (ci-test recommended)"
         required: false
@@ -39,6 +40,7 @@ on:
         required: false
         default: "DATABRICKS_VALIDATION_CLUSTER_ID"
         type: string
+
       promote_artifact_only:
         description: "If true, skip build and only deploy a previously-built artifact (cd-prod use-case)"
         required: false
@@ -55,6 +57,7 @@ on:
         required: false
         default: "text"
         type: string
+
       run_post_deploy_smoke:
         description: "If true, run a smoke test after deploy"
         required: false
@@ -76,7 +79,6 @@ on:
         default: ""
         type: string
 
-
     secrets:
       DATABRICKS_HOST:
         required: true
@@ -84,8 +86,6 @@ on:
         required: true
       DATABRICKS_VALIDATION_CLUSTER_ID:
         required: false
-      # Optional: if your deploy uses OIDC/Azure auth, you can extend this reusable workflow later.
-      # Azure credentials are intentionally not defined here to avoid coupling.
 
 jobs:
   databricks:
@@ -94,9 +94,6 @@ jobs:
     environment: ${{ inputs.environment_name }}
     permissions:
       contents: read
-      # Optional: if your deploy uses OIDC/Azure auth, you can extend this reusable workflow later.
-      # Azure credentials are intentionally not defined here to avoid coupling.
-      # id-token: write
     env:
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
@@ -117,7 +114,7 @@ jobs:
       - name: Install tooling
         run: |
           python -m pip install --upgrade pip
-          # DO NOT install legacy databricks-cli (it overrides the `databricks` command)
+          # Do NOT install legacy databricks-cli (it overrides the `databricks` command)
           pip install databricks-sdk
 
           sudo apt-get update
@@ -139,10 +136,21 @@ jobs:
             ci-dev|ci-test|cd-prod) ;;
             *) echo "Invalid mode: $MODE (expected ci-dev|ci-test|cd-prod)"; exit 2;;
           esac
+
           if [ ! -f "$BUNDLE_PATH/databricks.yml" ] && [ ! -f "$BUNDLE_PATH/databricks.yaml" ]; then
             echo "Could not find databricks.yml under bundle_path: $BUNDLE_PATH"
             exit 2
           fi
+
+          case "${{ inputs.post_deploy_summary_output }}" in
+            text|json|both) ;;
+            *) echo "Invalid post_deploy_summary_output: ${{ inputs.post_deploy_summary_output }} (expected text|json|both)"; exit 2;;
+          esac
+
+          case "${{ inputs.smoke_mode }}" in
+            notebook|bundle-run) ;;
+            *) echo "Invalid smoke_mode: ${{ inputs.smoke_mode }} (expected notebook|bundle-run)"; exit 2;;
+          esac
 
       - name: Sanity check Databricks CLI
         run: |
@@ -201,90 +209,136 @@ jobs:
         if: ${{ inputs.mode == 'ci-test' && inputs.run_asset_validation }}
         env:
           DATABRICKS_VALIDATION_CLUSTER_ID: ${{ secrets.DATABRICKS_VALIDATION_CLUSTER_ID }}
+          NOTEBOOK_PATH: ${{ inputs.asset_validation_notebook_path }}
+          ENV_NAME: ${{ inputs.target }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           if [ -z "$DATABRICKS_VALIDATION_CLUSTER_ID" ]; then
             echo "Missing secret: DATABRICKS_VALIDATION_CLUSTER_ID in environment: ${{ inputs.environment_name }}"
             exit 2
           fi
 
-          cat > run-asset-validation.json <<EOF
-          {
-            "run_name": "asset-validation-${{ github.sha }}",
-            "existing_cluster_id": "${DATABRICKS_VALIDATION_CLUSTER_ID}",
-            "notebook_task": {
-              "notebook_path": "${{ inputs.asset_validation_notebook_path }}",
-              "base_parameters": {
-                "env": "${TARGET}",
-                "commit_sha": "${{ github.sha }}"
-              }
-            }
-          }
-          EOF
+          python - <<'PY'
+          import os, time, sys
+          from databricks.sdk import WorkspaceClient
+          from databricks.sdk.service import jobs
 
-          databricks runs submit --json-file run-asset-validation.json > submit.out
-          RUN_ID=$(jq -r '.run_id' submit.out)
-          echo "Submitted Databricks run_id=$RUN_ID"
+          cluster_id = os.environ["DATABRICKS_VALIDATION_CLUSTER_ID"]
+          notebook_path = os.environ["NOTEBOOK_PATH"]
+          env_name = os.environ["ENV_NAME"]
+          commit_sha = os.environ["COMMIT_SHA"]
 
-          while true; do
-            STATE=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.life_cycle_state')
-            RESULT=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.result_state // empty')
-            echo "life_cycle_state=$STATE result_state=$RESULT"
-            if [ "$STATE" = "TERMINATED" ] || [ "$STATE" = "INTERNAL_ERROR" ] || [ "$STATE" = "SKIPPED" ]; then
-              break
-            fi
-            sleep 10
-          done
+          w = WorkspaceClient()
 
-          FINAL=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.result_state')
-          if [ "$FINAL" != "SUCCESS" ]; then
-            echo "Asset validation failed (result_state=$FINAL). See Databricks run_id=$RUN_ID."
-            exit 1
-          fi
+          run_name = f"asset-validation-{commit_sha}"
+          task = jobs.SubmitTask(
+              task_key="asset_validation",
+              existing_cluster_id=cluster_id,
+              notebook_task=jobs.NotebookTask(
+                  notebook_path=notebook_path,
+                  base_parameters={"env": env_name, "commit_sha": commit_sha},
+              ),
+          )
+
+          run = w.jobs.submit(run_name=run_name, tasks=[task])
+          run_id = run.run_id
+          print(f"Submitted Databricks job run_id={run_id}")
+
+          terminal = {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}
+          while True:
+              r = w.jobs.get_run(run_id)
+              state = r.state.life_cycle_state.name if r.state and r.state.life_cycle_state else None
+              result = r.state.result_state.name if r.state and r.state.result_state else None
+              print(f"life_cycle_state={state} result_state={result}")
+              if state in terminal:
+                  break
+              time.sleep(10)
+
+          final = w.jobs.get_run(run_id)
+          final_result = final.state.result_state.name if final.state and final.state.result_state else None
+          if final_result != "SUCCESS":
+              print(f"Asset validation failed (result_state={final_result}). run_id={run_id}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Asset validation SUCCESS")
+          PY
 
       - name: Post-deploy smoke (flagged)
-        if: ${{ inputs.run_post_deploy_smoke && (inputs.mode == 'ci-test' || inputs.mode == 'cd-prod') }}
+        if: ${{ inputs.run_post_deployment_tests && inputs.run_post_deploy_smoke && (inputs.mode == 'ci-test' || inputs.mode == 'cd-prod') }}
         env:
           DATABRICKS_VALIDATION_CLUSTER_ID: ${{ secrets.DATABRICKS_VALIDATION_CLUSTER_ID }}
+          SMOKE_MODE: ${{ inputs.smoke_mode }}
+          SMOKE_NOTEBOOK_PATH: ${{ inputs.smoke_notebook_path }}
+          SMOKE_JOB_KEY: ${{ inputs.smoke_job_key }}
+          ENV_NAME: ${{ inputs.target }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          if [ -z "${{ inputs.smoke_notebook_path }}" ]; then
-            echo "smoke_notebook_path is empty."
+          if [ -z "$SMOKE_MODE" ]; then
+            echo "smoke_mode is empty."
+            exit 2
+          fi
+
+          if [ "$SMOKE_MODE" = "bundle-run" ]; then
+            if [ -z "$SMOKE_JOB_KEY" ]; then
+              echo "smoke_job_key is empty (required when smoke_mode=bundle-run)."
+              exit 2
+            fi
+            cd "$BUNDLE_PATH"
+            databricks bundle run "$SMOKE_JOB_KEY" --target "$TARGET"
+            exit 0
+          fi
+
+          # notebook mode
+          if [ -z "$SMOKE_NOTEBOOK_PATH" ]; then
+            echo "smoke_notebook_path is empty (required when smoke_mode=notebook)."
             exit 2
           fi
           if [ -z "$DATABRICKS_VALIDATION_CLUSTER_ID" ]; then
-            echo "Missing secret: DATABRICKS_VALIDATION_CLUSTER_ID"
+            echo "Missing secret: DATABRICKS_VALIDATION_CLUSTER_ID (required for smoke notebook on an existing cluster)."
             exit 2
           fi
 
-          cat > run-smoke.json <<EOF
-          {
-            "run_name": "post-deploy-smoke-${{ github.sha }}",
-            "existing_cluster_id": "${DATABRICKS_VALIDATION_CLUSTER_ID}",
-            "notebook_task": {
-              "notebook_path": "${{ inputs.smoke_notebook_path }}",
-              "base_parameters": {
-                "env": "${TARGET}",
-                "commit_sha": "${{ github.sha }}"
-              }
-            }
-          }
-          EOF
+          python - <<'PY'
+          import os, time, sys
+          from databricks.sdk import WorkspaceClient
+          from databricks.sdk.service import jobs
 
-          databricks runs submit --json-file run-smoke.json > smoke_submit.out
-          RUN_ID=$(jq -r '.run_id' smoke_submit.out)
-          echo "Submitted smoke run_id=$RUN_ID"
+          cluster_id = os.environ["DATABRICKS_VALIDATION_CLUSTER_ID"]
+          notebook_path = os.environ["SMOKE_NOTEBOOK_PATH"]
+          env_name = os.environ["ENV_NAME"]
+          commit_sha = os.environ["COMMIT_SHA"]
 
-          while true; do
-            STATE=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.life_cycle_state')
-            RESULT=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.result_state // empty')
-            echo "life_cycle_state=$STATE result_state=$RESULT"
-            if [ "$STATE" = "TERMINATED" ] || [ "$STATE" = "INTERNAL_ERROR" ] || [ "$STATE" = "SKIPPED" ]; then
-              break
-            fi
-            sleep 10
-          done
+          w = WorkspaceClient()
 
-          FINAL=$(databricks runs get --run-id "$RUN_ID" | jq -r '.state.result_state')
-          if [ "$FINAL" != "SUCCESS" ]; then
-            echo "Smoke failed (result_state=$FINAL). See Databricks run_id=$RUN_ID."
-            exit 1
-          fi
+          run_name = f"post-deploy-smoke-{commit_sha}"
+          task = jobs.SubmitTask(
+              task_key="post_deploy_smoke",
+              existing_cluster_id=cluster_id,
+              notebook_task=jobs.NotebookTask(
+                  notebook_path=notebook_path,
+                  base_parameters={"env": env_name, "commit_sha": commit_sha},
+              ),
+          )
+
+          run = w.jobs.submit(run_name=run_name, tasks=[task])
+          run_id = run.run_id
+          print(f"Submitted smoke run_id={run_id}")
+
+          terminal = {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}
+          while True:
+              r = w.jobs.get_run(run_id)
+              state = r.state.life_cycle_state.name if r.state and r.state.life_cycle_state else None
+              result = r.state.result_state.name if r.state and r.state.result_state else None
+              print(f"life_cycle_state={state} result_state={result}")
+              if state in terminal:
+                  break
+              time.sleep(10)
+
+          final = w.jobs.get_run(run_id)
+          final_result = final.state.result_state.name if final.state and final.state.result_state else None
+          if final_result != "SUCCESS":
+              print(f"Smoke failed (result_state={final_result}). run_id={run_id}", file=sys.stderr)
+              sys.exit(1)
+
+          print("Smoke SUCCESS")
+          PY
