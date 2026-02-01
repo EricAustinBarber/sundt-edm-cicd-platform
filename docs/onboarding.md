@@ -20,6 +20,7 @@ Before onboarding, confirm the following:
 - Ownership assigned for the consuming repository
 - Required secrets created in Azure Key Vault and/or GitHub
 
+> Environment naming note: We currently use DataBricks-* (legacy ADO naming) to match existing environment keys and approvals. A future cleanup may rename these to Databricks-* after migration stabilization.
 ---
 
 ## Step 1: Add required branches

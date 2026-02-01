@@ -27,6 +27,8 @@ Goals:
 4. **Defense in depth**
    - GitHub Environments + Key Vault + Databricks permissions.
 
+> Environment naming note: We currently use DataBricks-* (legacy ADO naming) to match existing environment keys and approvals. A future cleanup may rename these to Databricks-* after migration stabilization.
+
 ---
 
 ## Identity and authentication options
