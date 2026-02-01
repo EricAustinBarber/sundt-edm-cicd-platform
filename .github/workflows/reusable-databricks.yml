@@ -50,6 +50,8 @@ on:
         required: true
       DATABRICKS_TOKEN:
         required: true
+      DATABRICKS_VALIDATION_CLUSTER_ID:
+        required: false
       # Optional: if your deploy uses OIDC/Azure auth, you can extend this reusable workflow later.
       # Azure credentials are intentionally not defined here to avoid coupling.
 
