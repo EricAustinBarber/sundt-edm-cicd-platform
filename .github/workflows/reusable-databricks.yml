@@ -206,7 +206,7 @@ jobs:
       - name: Bundle deploy
         run: |
           cd "$BUNDLE_PATH"
-          databricks bundle deploy --target "$TARGET" --auto-approve
+          databricks bundle deploy --target "$TARGET" --auto-approve --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID"
 
       - name: Post-deploy verification (bundle summary)
         if: ${{ inputs.run_post_deployment_tests }}
