@@ -215,16 +215,22 @@ jobs:
 
           case "${{ inputs.post_deploy_summary_output }}" in
             json)
-              databricks bundle summary --target "$TARGET" --output json > post_deploy_summary.json
+              databricks bundle summary --target "$TARGET" \
+                --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID" \
+                --output json > post_deploy_summary.json
               echo "Wrote post_deploy_summary.json"
               ;;
             both)
-              databricks bundle summary --target "$TARGET"
-              databricks bundle summary --target "$TARGET" --output json > post_deploy_summary.json
+              databricks bundle summary --target "$TARGET" \
+                --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID"
+              databricks bundle summary --target "$TARGET" \
+                --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID" \
+                --output json > post_deploy_summary.json
               echo "Wrote post_deploy_summary.json"
               ;;
             *)
-              databricks bundle summary --target "$TARGET"
+              databricks bundle summary --target "$TARGET" \
+                --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID"
               ;;
           esac
 
