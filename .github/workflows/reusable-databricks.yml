@@ -105,9 +105,9 @@ on:
       DATABRICKS_TOKEN:
         required: true
       DATABRICKS_VALIDATION_CLUSTER_ID:
-        required: false
+        required: true
       DATABRICKS_SQL_WAREHOUSE_ID:
-        required: false
+        required: true
 
 jobs:
   databricks:
@@ -119,6 +119,7 @@ jobs:
     env:
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      DATABRICKS_VALIDATION_CLUSTER_ID: ${{ secrets.DATABRICKS_VALIDATION_CLUSTER_ID }}
       BUNDLE_PATH: ${{ inputs.bundle_path }}
       TARGET: ${{ inputs.target }}
       ARTIFACT_NAME: ${{ inputs.artifact_name }}
