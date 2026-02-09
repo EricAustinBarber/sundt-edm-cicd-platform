@@ -99,6 +99,33 @@ on:
           SELECT 1
         type: string
 
+      # Governance maturity (telemetry first, enforcement later)
+      run_maturity_collect:
+        description: "If true, run maturity metric collection after deploy (safe; never fails)."
+        required: false
+        default: false
+        type: boolean
+      run_maturity_ci_check:
+        description: "If true, run maturity CI gate check after deploy (may fail depending on enforcement_mode / override)."
+        required: false
+        default: false
+        type: boolean
+      maturity_enforcement_mode:
+        description: "Override enforcement mode for this run: off|warn|block. Empty means use config table."
+        required: false
+        default: ""
+        type: string
+      maturity_override:
+        description: "Override behavior for this run: none|warn_only|skip"
+        required: false
+        default: "none"
+        type: string
+      bundle_name:
+        description: "Bundle name for deployment tracking (governance_maturity.bundle_deployments)"
+        required: false
+        default: ""
+        type: string
+
     secrets:
       DATABRICKS_HOST:
         required: true
@@ -139,18 +166,10 @@ jobs:
           python -m pip install --upgrade pip
           # Do NOT install legacy databricks-cli (it overrides the `databricks` command)
           pip install databricks-sdk
-
           sudo apt-get update
           sudo apt-get install -y jq zip
-
-          # Install the NEW Databricks CLI (supports `databricks bundle ...`)
           curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
-
-          echo "Databricks CLI path:"
-          which databricks
-          echo "Databricks CLI version:"
           databricks version
-          echo "Databricks bundle help:"
           databricks bundle -h
 
       - name: Validate inputs
@@ -175,23 +194,27 @@ jobs:
             *) echo "Invalid smoke_mode: ${{ inputs.smoke_mode }} (expected notebook|bundle-run)"; exit 2;;
           esac
 
-      - name: Sanity check Databricks CLI
-        run: |
-          which databricks
-          databricks version
-          databricks bundle -h
+          case "${{ inputs.maturity_override }}" in
+            none|warn_only|skip) ;;
+            *) echo "Invalid maturity_override: ${{ inputs.maturity_override }} (expected none|warn_only|skip)"; exit 2;;
+          esac
+
+          if [ -n "${{ inputs.maturity_enforcement_mode }}" ]; then
+            case "${{ inputs.maturity_enforcement_mode }}" in
+              off|warn|block) ;;
+              *) echo "Invalid maturity_enforcement_mode: ${{ inputs.maturity_enforcement_mode }} (expected off|warn|block)"; exit 2;;
+            esac
+          fi
 
       - name: Bundle validate
         run: |
           cd "$BUNDLE_PATH"
           databricks bundle validate --target "$TARGET" --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID"
 
-      # Build/package step (optional)
       - name: Package bundle content (artifact)
         if: ${{ inputs.promote_artifact_only == false }}
         run: |
           mkdir -p dist
-          # Package the bundle directory as-is (teams can change this later to a curated bundle package)
           zip -r "dist/${ARTIFACT_NAME}.zip" "$BUNDLE_PATH" -x "*.git*"
 
       - name: Upload artifact
@@ -208,270 +231,14 @@ jobs:
           cd "$BUNDLE_PATH"
           databricks bundle deploy --target "$TARGET" --auto-approve --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID"
 
-      - name: Post-deploy verification (bundle summary)
-        if: ${{ inputs.run_post_deployment_tests }}
+      - name: Maturity metrics collection (bundle run)
+        if: ${{ inputs.run_maturity_collect }}
         run: |
           cd "$BUNDLE_PATH"
+          databricks bundle run maturity_collect             --target "$TARGET"             --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID"             --params env="$TARGET"             --params run_id="${GITHUB_RUN_ID}"             --params commit_sha="${GITHUB_SHA}"             --params repo="${GITHUB_REPOSITORY}"             --params git_ref="${GITHUB_REF}"             --params workflow_run_id="${GITHUB_RUN_ID}"             --params bundle_name="${{ inputs.bundle_name }}"
 
-          case "${{ inputs.post_deploy_summary_output }}" in
-            json)
-              databricks bundle summary --target "$TARGET" \
-                --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID" \
-                --output json > post_deploy_summary.json
-              echo "Wrote post_deploy_summary.json"
-              ;;
-            both)
-              databricks bundle summary --target "$TARGET" \
-                --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID"
-              databricks bundle summary --target "$TARGET" \
-                --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID" \
-                --output json > post_deploy_summary.json
-              echo "Wrote post_deploy_summary.json"
-              ;;
-            *)
-              databricks bundle summary --target "$TARGET" \
-                --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID"
-              ;;
-          esac
-
-      - name: Asset validation (metadata-driven)
-        if: ${{ inputs.mode == 'ci-test' && inputs.run_asset_validation }}
-        env:
-          DATABRICKS_VALIDATION_CLUSTER_ID: ${{ secrets.DATABRICKS_VALIDATION_CLUSTER_ID }}
-          NOTEBOOK_PATH: ${{ inputs.asset_validation_notebook_path }}
-          ENV_NAME: ${{ inputs.target }}
-          COMMIT_SHA: ${{ github.sha }}
+      - name: Maturity CI gate check (bundle run)
+        if: ${{ inputs.run_maturity_ci_check }}
         run: |
-          if [ -z "$DATABRICKS_VALIDATION_CLUSTER_ID" ]; then
-            echo "Missing secret: DATABRICKS_VALIDATION_CLUSTER_ID in environment: ${{ inputs.environment_name }}"
-            exit 2
-          fi
-
-          python - <<'PY'
-          import os, time, sys
-          from databricks.sdk import WorkspaceClient
-          from databricks.sdk.errors.platform import NotFound
-          from databricks.sdk.service import jobs
-
-          cluster_id = os.environ["DATABRICKS_VALIDATION_CLUSTER_ID"]
-          notebook_path = os.environ["NOTEBOOK_PATH"]
-          env_name = os.environ["ENV_NAME"]
-          commit_sha = os.environ["COMMIT_SHA"]
-
-          w = WorkspaceClient()
-
-          # Fail fast with a clearer error if the cluster id is wrong for this workspace.
-          try:
-              w.clusters.get(cluster_id)
-          except NotFound:
-              print(f"Cluster '{cluster_id}' does not exist in this workspace. Check GitHub Environment secrets for {env_name}.", file=sys.stderr)
-              raise
-
-          run_name = f"asset-validation-{commit_sha}"
-          task = jobs.SubmitTask(
-              task_key="asset_validation",
-              existing_cluster_id=cluster_id,
-              notebook_task=jobs.NotebookTask(
-                  notebook_path=notebook_path,
-                  base_parameters={"env": env_name, "commit_sha": commit_sha},
-              ),
-          )
-
-          run = w.jobs.submit(run_name=run_name, tasks=[task])
-          run_id = run.run_id
-          print(f"Submitted Databricks job run_id={run_id}")
-
-          terminal = {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}
-          while True:
-              r = w.jobs.get_run(run_id)
-              state = r.state.life_cycle_state.name if r.state and r.state.life_cycle_state else None
-              result = r.state.result_state.name if r.state and r.state.result_state else None
-              print(f"life_cycle_state={state} result_state={result}")
-              if state in terminal:
-                  break
-              time.sleep(10)
-
-          final = w.jobs.get_run(run_id)
-          final_result = final.state.result_state.name if final.state and final.state.result_state else None
-          if final_result != "SUCCESS":
-              print(f"Asset validation failed (result_state={final_result}). run_id={run_id}", file=sys.stderr)
-              sys.exit(1)
-
-          print("Asset validation SUCCESS")
-          PY
-
-      - name: Post-deploy smoke (job/notebook, compute plane)
-        if: ${{ inputs.run_post_deployment_tests && inputs.run_post_deploy_smoke }}
-        env:
-          DATABRICKS_VALIDATION_CLUSTER_ID: ${{ secrets.DATABRICKS_VALIDATION_CLUSTER_ID }}
-          SMOKE_MODE: ${{ inputs.smoke_mode }}
-          SMOKE_NOTEBOOK_PATH: ${{ inputs.smoke_notebook_path }}
-          SMOKE_JOB_KEY: ${{ inputs.smoke_job_key }}
-          ENV_NAME: ${{ inputs.target }}
-          COMMIT_SHA: ${{ github.sha }}
-        run: |
-          if [ -z "$SMOKE_MODE" ]; then
-            echo "smoke_mode is empty."
-            exit 2
-          fi
-
-          if [ "$SMOKE_MODE" = "bundle-run" ]; then
-            if [ -z "$SMOKE_JOB_KEY" ]; then
-              echo "smoke_job_key is empty (required when smoke_mode=bundle-run)."
-              exit 2
-            fi
-            cd "$BUNDLE_PATH"
-            databricks bundle run "$SMOKE_JOB_KEY" --target "$TARGET" --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID"
-            exit 0
-          fi
-
-          # notebook mode
-          if [ -z "$SMOKE_NOTEBOOK_PATH" ]; then
-            echo "smoke_notebook_path is empty (required when smoke_mode=notebook)."
-            exit 2
-          fi
-          if [ -z "$DATABRICKS_VALIDATION_CLUSTER_ID" ]; then
-            echo "Missing secret: DATABRICKS_VALIDATION_CLUSTER_ID (required for smoke notebook on an existing cluster)."
-            exit 2
-          fi
-
-          python - <<'PY'
-          import os, time, sys
-          from databricks.sdk import WorkspaceClient
-          from databricks.sdk.errors.platform import NotFound
-          from databricks.sdk.service import jobs
-
-          cluster_id = os.environ["DATABRICKS_VALIDATION_CLUSTER_ID"]
-          notebook_path = os.environ["SMOKE_NOTEBOOK_PATH"]
-          env_name = os.environ["ENV_NAME"]
-          commit_sha = os.environ["COMMIT_SHA"]
-
-          w = WorkspaceClient()
-
-          # Fail fast with a clearer error if the cluster id is wrong for this workspace.
-          try:
-              w.clusters.get(cluster_id)
-          except NotFound:
-              print(f"Cluster '{cluster_id}' does not exist in this workspace. Check GitHub Environment secrets for {env_name}.", file=sys.stderr)
-              raise
-
-          run_name = f"post-deploy-smoke-{commit_sha}"
-          task = jobs.SubmitTask(
-              task_key="post_deploy_smoke",
-              existing_cluster_id=cluster_id,
-              notebook_task=jobs.NotebookTask(
-                  notebook_path=notebook_path,
-                  base_parameters={"env": env_name, "commit_sha": commit_sha},
-              ),
-          )
-
-          run = w.jobs.submit(run_name=run_name, tasks=[task])
-          run_id = run.run_id
-          print(f"Submitted smoke run_id={run_id}")
-
-          terminal = {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}
-          while True:
-              r = w.jobs.get_run(run_id)
-              state = r.state.life_cycle_state.name if r.state and r.state.life_cycle_state else None
-              result = r.state.result_state.name if r.state and r.state.result_state else None
-              print(f"life_cycle_state={state} result_state={result}")
-              if state in terminal:
-                  break
-              time.sleep(10)
-
-          final = w.jobs.get_run(run_id)
-          final_result = final.state.result_state.name if final.state and final.state.result_state else None
-          if final_result != "SUCCESS":
-              print(f"Smoke failed (result_state={final_result}). run_id={run_id}", file=sys.stderr)
-              sys.exit(1)
-
-          print("Smoke SUCCESS")
-          PY
-
-      - name: Post-deploy smoke (SQL Warehouse, serving plane)
-        if: ${{ inputs.run_post_deployment_tests && inputs.run_sql_smoke }}
-        env:
-          DATABRICKS_SQL_WAREHOUSE_ID: ${{ secrets.DATABRICKS_SQL_WAREHOUSE_ID }}
-          SQL_SMOKE_QUERIES: ${{ inputs.sql_smoke_queries }}
-          ENV_NAME: ${{ inputs.target }}
-        run: |
-          if [ -z "$DATABRICKS_SQL_WAREHOUSE_ID" ]; then
-            echo "Missing secret: DATABRICKS_SQL_WAREHOUSE_ID in environment: ${{ inputs.environment_name }}"
-            exit 2
-          fi
-
-          python - <<'PY'
-          import os, time, sys
-          from databricks.sdk import WorkspaceClient
-          from databricks.sdk.errors.platform import NotFound
-
-          warehouse_id = os.environ["DATABRICKS_SQL_WAREHOUSE_ID"]
-          env_name = os.environ.get("ENV_NAME", "unknown")
-
-          raw = os.environ.get("SQL_SMOKE_QUERIES", "SELECT 1")
-          queries = [q.strip() for q in raw.splitlines() if q.strip()]
-
-          w = WorkspaceClient()
-
-          # Ensure warehouse exists, and try to start it if not running.
-          try:
-              wh = w.warehouses.get(warehouse_id)
-          except NotFound:
-              print(f"SQL Warehouse '{warehouse_id}' does not exist in this workspace. Check GitHub Environment secrets for {env_name}.", file=sys.stderr)
-              raise
-
-          state = getattr(wh, "state", None)
-          state_name = state.name if state else None
-          print(f"Warehouse state={state_name}")
-
-          if state_name and state_name != "RUNNING":
-              print("Starting warehouse...")
-              w.warehouses.start(warehouse_id)
-
-              # Poll for RUNNING (up to ~10 minutes)
-              deadline = time.time() + 600
-              while time.time() < deadline:
-                  wh = w.warehouses.get(warehouse_id)
-                  state = getattr(wh, "state", None)
-                  state_name = state.name if state else None
-                  print(f"Warehouse state={state_name}")
-                  if state_name == "RUNNING":
-                      break
-                  time.sleep(10)
-
-              if state_name != "RUNNING":
-                  print(f"Warehouse did not reach RUNNING state (last_state={state_name}).", file=sys.stderr)
-                  sys.exit(1)
-
-          def wait_statement(statement_id: str, timeout_s: int = 300):
-              deadline = time.time() + timeout_s
-              while True:
-                  resp = w.statement_execution.get_statement(statement_id)
-                  status = resp.status
-                  state = status.state.name if status and status.state else None
-                  print(f"statement_id={statement_id} state={state}")
-                  if state in ("SUCCEEDED", "FAILED", "CANCELED", "CLOSED"):
-                      return resp
-                  if time.time() > deadline:
-                      raise TimeoutError(f"Timed out waiting for statement {statement_id} (last_state={state})")
-                  time.sleep(2)
-
-          # Execute each statement and require success.
-          for i, q in enumerate(queries, start=1):
-              print(f"\n--- SQL smoke [{i}/{len(queries)}] ---\n{q}\n")
-              exec_resp = w.statement_execution.execute_statement(
-                  warehouse_id=warehouse_id,
-                  statement=q,
-                  wait_timeout="0s",  # async; we poll
-              )
-              stmt_id = exec_resp.statement_id
-              final = wait_statement(stmt_id, timeout_s=300)
-              status = final.status
-              state = status.state.name if status and status.state else None
-              if state != "SUCCEEDED":
-                  msg = status.error.message if status and status.error else "Unknown error"
-                  print(f"SQL smoke FAILED: state={state} error={msg}", file=sys.stderr)
-                  sys.exit(1)
-
-          print("\nSQL smoke SUCCESS")
-          PY
+          cd "$BUNDLE_PATH"
+          databricks bundle run maturity_ci_check             --target "$TARGET"             --var="validation_cluster_id=$DATABRICKS_VALIDATION_CLUSTER_ID"             --params env="$TARGET"             --params enforcement_mode="${{ inputs.maturity_enforcement_mode }}"             --params maturity_override="${{ inputs.maturity_override }}"
