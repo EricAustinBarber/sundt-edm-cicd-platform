@@ -59,11 +59,11 @@ For each environment:
 **Required**
 - `DATABRICKS_HOST`
 - `DATABRICKS_TOKEN` (or OIDC config)
-- `DATABRICKS_CLUSTER_ID` (if applicable)
 
 **Optional**
-- Feature flags
-- Deployment toggles
+- `DATABRICKS_VALIDATION_CLUSTER_ID` (required if `run_asset_validation=true` or notebook smoke is enabled)
+- `DATABRICKS_SQL_WAREHOUSE_ID` (required if `run_sql_smoke=true`)
+- Feature flags and deployment toggles
 
 Secrets must never be committed to source control.
 
@@ -86,11 +86,15 @@ on:
   pull_request:
 
 jobs:
-  ci:
+  ci_dev:
     uses: sundt/SUNDT_DW_CICD_PIPELINE/.github/workflows/reusable-databricks.yml@main
     with:
-      bundle_path: databricks/
-      environment: ${{ github.ref_name }}
+      mode: ci-dev
+      bundle_path: databricks
+      target: dev
+      environment_name: DataBricks-Dev
+      run_asset_validation: false
+    secrets: inherit
 ```
 
 This delegates CI/CD logic to the platform repo.

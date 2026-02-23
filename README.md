@@ -37,7 +37,21 @@ See `docs/workflow-validation-runbook.md` for dev/test validation runs.
 - Runtime data secrets resolved from Azure Key Vault where possible
 
 See `docs/security-and-secrets.md` for the detailed model.
+See `SECURITY.md` for vulnerability reporting and support policy.
+
+## Production hardening controls
+- Platform CI now validates:
+  - Workflow syntax (`actionlint`)
+  - YAML quality (`yamllint`)
+  - Markdown quality (`markdownlint`)
+  - Broken documentation links (`lychee`)
+- Reusable deployment workflow enforces:
+  - Strict mode shell execution (`set -euo pipefail`)
+  - Mode/target/environment alignment checks
+  - `cd-prod` branch guard (must run from `prod`)
+  - SQL smoke timeout failure handling
+  - Secret masking for optional IDs
 
 ## Current status
 
-Reusable Databricks workflow foundation is in place and ready for consuming repositories.
+Reusable Databricks workflow foundation is in place with baseline production hardening and delivery runbooks.

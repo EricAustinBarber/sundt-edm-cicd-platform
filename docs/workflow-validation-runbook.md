@@ -20,4 +20,5 @@ Use this runbook to execute one validation run in `dev` and `test`.
 ## Success criteria
 
 - `workflow-lint` passes.
+- `yaml-lint` passes.
 - `docs-guard` passes.

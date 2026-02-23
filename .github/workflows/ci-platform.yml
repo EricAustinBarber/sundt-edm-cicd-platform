@@ -18,24 +18,54 @@ jobs:
   workflow_lint:
     name: workflow-lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Install actionlint
-        run: |
-          curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest
-          echo "$PWD" >> $GITHUB_PATH
       - name: Run actionlint
-        run: ./actionlint -color
+        uses: rhysd/actionlint@v1
+
+  yaml_lint:
+    name: yaml-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install yamllint
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install yamllint==1.37.1
+      - name: Run yamllint
+        run: |
+          set -euo pipefail
+          yamllint -c .yamllint.yml .github/workflows examples/consuming-repo/.github/workflows
 
   docs_guard:
     name: docs-guard
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Verify required docs exist
         run: |
+          set -euo pipefail
           test -f README.md
           test -f docs/security-and-secrets.md
           test -f docs/branching-and-promotion.md
+      - name: Markdown lint
+        uses: DavidAnson/markdownlint-cli2-action@v20
+        with:
+          config: .markdownlint-cli2.jsonc
+          globs: |
+            **/*.md
+      - name: Link check docs
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress --verbose --include-fragments docs README.md

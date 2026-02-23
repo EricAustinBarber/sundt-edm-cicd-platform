@@ -16,6 +16,7 @@ Use this checklist to configure production-grade repository governance.
 
 Configure these required checks:
 - `workflow-lint` (from `ci-platform`)
+- `yaml-lint` (from `ci-platform`)
 - `docs-guard` (from `ci-platform`)
 
 For `prod`/`main`, also require:

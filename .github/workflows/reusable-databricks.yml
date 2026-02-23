@@ -125,6 +125,11 @@ on:
         required: false
         default: ""
         type: string
+      databricks_cli_version:
+        description: "Pinned Databricks CLI installer release tag."
+        required: false
+        default: "v0.277.0"
+        type: string
 
     secrets:
       DATABRICKS_HOST:
@@ -136,10 +141,14 @@ on:
       DATABRICKS_SQL_WAREHOUSE_ID:
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   databricks:
     name: ${{ inputs.mode }}
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     environment: ${{ inputs.environment_name }}
     permissions:
       contents: read
@@ -162,29 +171,43 @@ jobs:
 
       - name: Install tooling
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           # Do NOT install legacy databricks-cli (it overrides the `databricks` command)
           pip install databricks-sdk==0.53.0
           sudo apt-get update
           sudo apt-get install -y jq zip
-          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/v0.277.0/install.sh | sh
+          curl -fsSL "https://raw.githubusercontent.com/databricks/setup-cli/${{ inputs.databricks_cli_version }}/install.sh" | sh
           databricks version
           databricks bundle -h
 
       - name: Resolve optional secrets
         shell: bash
         run: |
+          set -euo pipefail
           validation_cluster_id="${{ secrets[inputs.asset_validation_cluster_id_secret] }}"
           sql_warehouse_id="${{ secrets[inputs.sql_warehouse_id_secret] }}"
+          if [ -n "$validation_cluster_id" ]; then
+            echo "::add-mask::$validation_cluster_id"
+          fi
+          if [ -n "$sql_warehouse_id" ]; then
+            echo "::add-mask::$sql_warehouse_id"
+          fi
           echo "VALIDATION_CLUSTER_ID=$validation_cluster_id" >> "$GITHUB_ENV"
           echo "SQL_WAREHOUSE_ID=$sql_warehouse_id" >> "$GITHUB_ENV"
 
       - name: Validate inputs
         run: |
+          set -euo pipefail
           case "$MODE" in
             ci-dev|ci-test|cd-prod) ;;
             *) echo "Invalid mode: $MODE (expected ci-dev|ci-test|cd-prod)"; exit 2;;
           esac
+
+          if [[ "$BUNDLE_PATH" == /* ]] || [[ "$BUNDLE_PATH" == *".."* ]]; then
+            echo "Invalid bundle_path: $BUNDLE_PATH (must be relative and must not contain '..')"
+            exit 2
+          fi
 
           if [ ! -f "$BUNDLE_PATH/databricks.yml" ] && [ ! -f "$BUNDLE_PATH/databricks.yaml" ]; then
             echo "Could not find databricks.yml under bundle_path: $BUNDLE_PATH"
@@ -228,9 +251,20 @@ jobs:
             exit 2
           fi
 
+          case "$MODE:$TARGET:${{ inputs.environment_name }}" in
+            ci-dev:dev:DataBricks-Dev|ci-test:test:DataBricks-Test|cd-prod:prod:DataBricks-Prod) ;;
+            *) echo "Invalid mode/target/environment_name combination: $MODE/$TARGET/${{ inputs.environment_name }}"; exit 2;;
+          esac
+
+          if [ "$MODE" = "cd-prod" ] && [ "${GITHUB_REF_NAME:-}" != "prod" ]; then
+            echo "cd-prod is only allowed when caller ref is prod. Current ref: ${GITHUB_REF_NAME:-unknown}"
+            exit 2
+          fi
+
       - name: Bundle validate
         shell: bash
         run: |
+          set -euo pipefail
           cd "$BUNDLE_PATH"
           extra_var=""
           if [ -n "${VALIDATION_CLUSTER_ID:-}" ]; then
@@ -241,6 +275,7 @@ jobs:
       - name: Package bundle content (artifact)
         if: ${{ inputs.promote_artifact_only == false }}
         run: |
+          set -euo pipefail
           mkdir -p dist
           zip -r "dist/${ARTIFACT_NAME}.zip" "$BUNDLE_PATH" -x "*.git*"
 
@@ -256,6 +291,7 @@ jobs:
       - name: Bundle deploy
         shell: bash
         run: |
+          set -euo pipefail
           cd "$BUNDLE_PATH"
           extra_var=""
           if [ -n "${VALIDATION_CLUSTER_ID:-}" ]; then
@@ -267,6 +303,7 @@ jobs:
         if: ${{ inputs.run_post_deployment_tests }}
         shell: bash
         run: |
+          set -euo pipefail
           cd "$BUNDLE_PATH"
           case "${{ inputs.post_deploy_summary_output }}" in
             text)
@@ -285,6 +322,7 @@ jobs:
         if: ${{ inputs.run_post_deploy_smoke && inputs.smoke_mode == 'bundle-run' }}
         shell: bash
         run: |
+          set -euo pipefail
           if [ -z "${{ inputs.smoke_job_key }}" ]; then
             echo "smoke_mode=bundle-run requires smoke_job_key"
             exit 2
@@ -300,6 +338,7 @@ jobs:
         if: ${{ inputs.run_post_deploy_smoke && inputs.smoke_mode == 'notebook' }}
         shell: bash
         run: |
+          set -euo pipefail
           if [ -z "${{ inputs.smoke_notebook_path }}" ]; then
             echo "smoke_mode=notebook requires smoke_notebook_path"
             exit 2
@@ -350,6 +389,7 @@ jobs:
         if: ${{ inputs.run_sql_smoke }}
         shell: bash
         run: |
+          set -euo pipefail
           while IFS= read -r sql; do
             if [ -z "$sql" ]; then
               continue
@@ -363,11 +403,13 @@ jobs:
               echo "$resp"
               exit 1
             fi
+            statement_succeeded="false"
             for i in $(seq 1 60); do
               status_resp="$(databricks api get "/api/2.0/sql/statements/$stmt_id")"
               state="$(echo "$status_resp" | jq -r '.status.state')"
               echo "SQL statement $stmt_id state: $state"
               if [ "$state" = "SUCCEEDED" ]; then
+                statement_succeeded="true"
                 break
               fi
               if [ "$state" = "FAILED" ] || [ "$state" = "CANCELED" ] || [ "$state" = "CLOSED" ]; then
@@ -376,6 +418,10 @@ jobs:
               fi
               sleep 5
             done
+            if [ "$statement_succeeded" != "true" ]; then
+              echo "SQL smoke statement timed out: $stmt_id"
+              exit 1
+            fi
           done << 'EOF'
           ${{ inputs.sql_smoke_queries }}
           EOF
@@ -384,6 +430,7 @@ jobs:
         if: ${{ inputs.run_asset_validation }}
         shell: bash
         run: |
+          set -euo pipefail
           run_output="$(databricks jobs submit --json "$(jq -n \
             --arg cid "$VALIDATION_CLUSTER_ID" \
             --arg path "${{ inputs.asset_validation_notebook_path }}" \
@@ -442,6 +489,7 @@ jobs:
         if: ${{ inputs.run_maturity_collect }}
         shell: bash
         run: |
+          set -euo pipefail
           cd "$BUNDLE_PATH"
           extra_var=""
           if [ -n "${VALIDATION_CLUSTER_ID:-}" ]; then
@@ -462,6 +510,7 @@ jobs:
         if: ${{ inputs.run_maturity_ci_check }}
         shell: bash
         run: |
+          set -euo pipefail
           cd "$BUNDLE_PATH"
           extra_var=""
           if [ -n "${VALIDATION_CLUSTER_ID:-}" ]; then
