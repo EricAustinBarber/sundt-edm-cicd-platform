@@ -159,6 +159,19 @@ jobs:
       TARGET: ${{ inputs.target }}
       ARTIFACT_NAME: ${{ inputs.artifact_name }}
       MODE: ${{ inputs.mode }}
+      ENVIRONMENT_NAME_INPUT: ${{ inputs.environment_name }}
+      POST_DEPLOY_SUMMARY_OUTPUT: ${{ inputs.post_deploy_summary_output }}
+      SMOKE_MODE_INPUT: ${{ inputs.smoke_mode }}
+      MATURITY_OVERRIDE_INPUT: ${{ inputs.maturity_override }}
+      MATURITY_ENFORCEMENT_MODE_INPUT: ${{ inputs.maturity_enforcement_mode }}
+      RUN_ASSET_VALIDATION_INPUT: ${{ inputs.run_asset_validation }}
+      RUN_POST_DEPLOY_SMOKE_INPUT: ${{ inputs.run_post_deploy_smoke }}
+      RUN_SQL_SMOKE_INPUT: ${{ inputs.run_sql_smoke }}
+      ASSET_VALIDATION_CLUSTER_ID_SECRET_INPUT: ${{ inputs.asset_validation_cluster_id_secret }}
+      SQL_WAREHOUSE_ID_SECRET_INPUT: ${{ inputs.sql_warehouse_id_secret }}
+      SMOKE_JOB_KEY_INPUT: ${{ inputs.smoke_job_key }}
+      SMOKE_NOTEBOOK_PATH_INPUT: ${{ inputs.smoke_notebook_path }}
+      BUNDLE_NAME_INPUT: ${{ inputs.bundle_name }}
 
     steps:
       - name: Checkout
@@ -214,46 +227,46 @@ jobs:
             exit 2
           fi
 
-          case "${{ inputs.post_deploy_summary_output }}" in
+          case "$POST_DEPLOY_SUMMARY_OUTPUT" in
             text|json|both) ;;
-            *) echo "Invalid post_deploy_summary_output: ${{ inputs.post_deploy_summary_output }} (expected text|json|both)"; exit 2;;
+            *) echo "Invalid post_deploy_summary_output: $POST_DEPLOY_SUMMARY_OUTPUT (expected text|json|both)"; exit 2;;
           esac
 
-          case "${{ inputs.smoke_mode }}" in
+          case "$SMOKE_MODE_INPUT" in
             notebook|bundle-run) ;;
-            *) echo "Invalid smoke_mode: ${{ inputs.smoke_mode }} (expected notebook|bundle-run)"; exit 2;;
+            *) echo "Invalid smoke_mode: $SMOKE_MODE_INPUT (expected notebook|bundle-run)"; exit 2;;
           esac
 
-          case "${{ inputs.maturity_override }}" in
+          case "$MATURITY_OVERRIDE_INPUT" in
             none|warn_only|skip) ;;
-            *) echo "Invalid maturity_override: ${{ inputs.maturity_override }} (expected none|warn_only|skip)"; exit 2;;
+            *) echo "Invalid maturity_override: $MATURITY_OVERRIDE_INPUT (expected none|warn_only|skip)"; exit 2;;
           esac
 
-          if [ -n "${{ inputs.maturity_enforcement_mode }}" ]; then
-            case "${{ inputs.maturity_enforcement_mode }}" in
+          if [ -n "$MATURITY_ENFORCEMENT_MODE_INPUT" ]; then
+            case "$MATURITY_ENFORCEMENT_MODE_INPUT" in
               off|warn|block) ;;
-              *) echo "Invalid maturity_enforcement_mode: ${{ inputs.maturity_enforcement_mode }} (expected off|warn|block)"; exit 2;;
+              *) echo "Invalid maturity_enforcement_mode: $MATURITY_ENFORCEMENT_MODE_INPUT (expected off|warn|block)"; exit 2;;
             esac
           fi
 
-          if [ "${{ inputs.run_asset_validation }}" = "true" ] && [ -z "${VALIDATION_CLUSTER_ID:-}" ]; then
-            echo "run_asset_validation=true requires a cluster id secret: ${{ inputs.asset_validation_cluster_id_secret }}"
+          if [ "$RUN_ASSET_VALIDATION_INPUT" = "true" ] && [ -z "${VALIDATION_CLUSTER_ID:-}" ]; then
+            echo "run_asset_validation=true requires a cluster id secret: $ASSET_VALIDATION_CLUSTER_ID_SECRET_INPUT"
             exit 2
           fi
 
-          if [ "${{ inputs.run_post_deploy_smoke }}" = "true" ] && [ "${{ inputs.smoke_mode }}" = "notebook" ] && [ -z "${VALIDATION_CLUSTER_ID:-}" ]; then
-            echo "smoke_mode=notebook requires a cluster id secret: ${{ inputs.asset_validation_cluster_id_secret }}"
+          if [ "$RUN_POST_DEPLOY_SMOKE_INPUT" = "true" ] && [ "$SMOKE_MODE_INPUT" = "notebook" ] && [ -z "${VALIDATION_CLUSTER_ID:-}" ]; then
+            echo "smoke_mode=notebook requires a cluster id secret: $ASSET_VALIDATION_CLUSTER_ID_SECRET_INPUT"
             exit 2
           fi
 
-          if [ "${{ inputs.run_sql_smoke }}" = "true" ] && [ -z "${SQL_WAREHOUSE_ID:-}" ]; then
-            echo "run_sql_smoke=true requires a warehouse id secret: ${{ inputs.sql_warehouse_id_secret }}"
+          if [ "$RUN_SQL_SMOKE_INPUT" = "true" ] && [ -z "${SQL_WAREHOUSE_ID:-}" ]; then
+            echo "run_sql_smoke=true requires a warehouse id secret: $SQL_WAREHOUSE_ID_SECRET_INPUT"
             exit 2
           fi
 
-          case "$MODE:$TARGET:${{ inputs.environment_name }}" in
+          case "$MODE:$TARGET:$ENVIRONMENT_NAME_INPUT" in
             ci-dev:dev:DataBricks-Dev|ci-test:test:DataBricks-Test|cd-prod:prod:DataBricks-Prod) ;;
-            *) echo "Invalid mode/target/environment_name combination: $MODE/$TARGET/${{ inputs.environment_name }}"; exit 2;;
+            *) echo "Invalid mode/target/environment_name combination: $MODE/$TARGET/$ENVIRONMENT_NAME_INPUT"; exit 2;;
           esac
 
           if [ "$MODE" = "cd-prod" ] && [ "${GITHUB_REF_NAME:-}" != "prod" ]; then
@@ -266,11 +279,11 @@ jobs:
         run: |
           set -euo pipefail
           cd "$BUNDLE_PATH"
-          extra_var=""
+          extra_args=()
           if [ -n "${VALIDATION_CLUSTER_ID:-}" ]; then
-            extra_var="--var=validation_cluster_id=$VALIDATION_CLUSTER_ID"
+            extra_args+=(--var "validation_cluster_id=$VALIDATION_CLUSTER_ID")
           fi
-          databricks bundle validate --target "$TARGET" $extra_var
+          databricks bundle validate --target "$TARGET" "${extra_args[@]}"
 
       - name: Package bundle content (artifact)
         if: ${{ inputs.promote_artifact_only == false }}
@@ -293,11 +306,11 @@ jobs:
         run: |
           set -euo pipefail
           cd "$BUNDLE_PATH"
-          extra_var=""
+          extra_args=()
           if [ -n "${VALIDATION_CLUSTER_ID:-}" ]; then
-            extra_var="--var=validation_cluster_id=$VALIDATION_CLUSTER_ID"
+            extra_args+=(--var "validation_cluster_id=$VALIDATION_CLUSTER_ID")
           fi
-          databricks bundle deploy --target "$TARGET" --auto-approve $extra_var
+          databricks bundle deploy --target "$TARGET" --auto-approve "${extra_args[@]}"
 
       - name: Post-deploy bundle summary
         if: ${{ inputs.run_post_deployment_tests }}
@@ -323,29 +336,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${{ inputs.smoke_job_key }}" ]; then
+          if [ -z "$SMOKE_JOB_KEY_INPUT" ]; then
             echo "smoke_mode=bundle-run requires smoke_job_key"
             exit 2
           fi
           cd "$BUNDLE_PATH"
-          extra_var=""
+          extra_args=()
           if [ -n "${VALIDATION_CLUSTER_ID:-}" ]; then
-            extra_var="--var=validation_cluster_id=$VALIDATION_CLUSTER_ID"
+            extra_args+=(--var "validation_cluster_id=$VALIDATION_CLUSTER_ID")
           fi
-          databricks bundle run "${{ inputs.smoke_job_key }}" --target "$TARGET" $extra_var
+          databricks bundle run "$SMOKE_JOB_KEY_INPUT" --target "$TARGET" "${extra_args[@]}"
 
       - name: Post-deploy smoke (notebook submit)
         if: ${{ inputs.run_post_deploy_smoke && inputs.smoke_mode == 'notebook' }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${{ inputs.smoke_notebook_path }}" ]; then
+          if [ -z "$SMOKE_NOTEBOOK_PATH_INPUT" ]; then
             echo "smoke_mode=notebook requires smoke_notebook_path"
             exit 2
           fi
           run_output="$(databricks jobs submit --json "$(jq -n \
             --arg cid "$VALIDATION_CLUSTER_ID" \
-            --arg path "${{ inputs.smoke_notebook_path }}" \
+            --arg path "$SMOKE_NOTEBOOK_PATH_INPUT" \
             '{
               run_name: "github-smoke-${{ inputs.target }}-${{ github.run_id }}",
               tasks: [
@@ -364,11 +377,11 @@ jobs:
             exit 1
           fi
           echo "Submitted smoke run_id=$run_id"
-          for i in $(seq 1 60); do
+          for attempt in $(seq 1 60); do
             state_json="$(databricks jobs get-run "$run_id")"
             life_cycle_state="$(echo "$state_json" | jq -r '.state.life_cycle_state')"
             result_state="$(echo "$state_json" | jq -r '.state.result_state // empty')"
-            echo "Smoke run state: $life_cycle_state result: ${result_state:-n/a}"
+            echo "Smoke run state (attempt $attempt): $life_cycle_state result: ${result_state:-n/a}"
             if [ "$life_cycle_state" = "TERMINATED" ]; then
               if [ "$result_state" = "SUCCESS" ]; then
                 exit 0
@@ -404,10 +417,10 @@ jobs:
               exit 1
             fi
             statement_succeeded="false"
-            for i in $(seq 1 60); do
+            for attempt in $(seq 1 60); do
               status_resp="$(databricks api get "/api/2.0/sql/statements/$stmt_id")"
               state="$(echo "$status_resp" | jq -r '.status.state')"
-              echo "SQL statement $stmt_id state: $state"
+              echo "SQL statement $stmt_id state (attempt $attempt): $state"
               if [ "$state" = "SUCCEEDED" ]; then
                 statement_succeeded="true"
                 break
@@ -464,11 +477,11 @@ jobs:
             exit 1
           fi
           echo "Submitted asset validation run_id=$validation_run_id"
-          for i in $(seq 1 120); do
+          for attempt in $(seq 1 120); do
             state_json="$(databricks jobs get-run "$validation_run_id")"
             life_cycle_state="$(echo "$state_json" | jq -r '.state.life_cycle_state')"
             result_state="$(echo "$state_json" | jq -r '.state.result_state // empty')"
-            echo "Asset validation state: $life_cycle_state result: ${result_state:-n/a}"
+            echo "Asset validation state (attempt $attempt): $life_cycle_state result: ${result_state:-n/a}"
             if [ "$life_cycle_state" = "TERMINATED" ]; then
               if [ "$result_state" = "SUCCESS" ]; then
                 exit 0
@@ -491,20 +504,20 @@ jobs:
         run: |
           set -euo pipefail
           cd "$BUNDLE_PATH"
-          extra_var=""
+          extra_args=()
           if [ -n "${VALIDATION_CLUSTER_ID:-}" ]; then
-            extra_var="--var=validation_cluster_id=$VALIDATION_CLUSTER_ID"
+            extra_args+=(--var "validation_cluster_id=$VALIDATION_CLUSTER_ID")
           fi
           databricks bundle run maturity_collect \
             --target "$TARGET" \
-            $extra_var \
+            "${extra_args[@]}" \
             --params env="$TARGET" \
             --params run_id="${GITHUB_RUN_ID}" \
             --params commit_sha="${GITHUB_SHA}" \
             --params repo="${GITHUB_REPOSITORY}" \
             --params git_ref="${GITHUB_REF}" \
             --params workflow_run_id="${GITHUB_RUN_ID}" \
-            --params bundle_name="${{ inputs.bundle_name }}"
+            --params bundle_name="$BUNDLE_NAME_INPUT"
 
       - name: Maturity CI gate check (bundle run)
         if: ${{ inputs.run_maturity_ci_check }}
@@ -512,13 +525,13 @@ jobs:
         run: |
           set -euo pipefail
           cd "$BUNDLE_PATH"
-          extra_var=""
+          extra_args=()
           if [ -n "${VALIDATION_CLUSTER_ID:-}" ]; then
-            extra_var="--var=validation_cluster_id=$VALIDATION_CLUSTER_ID"
+            extra_args+=(--var "validation_cluster_id=$VALIDATION_CLUSTER_ID")
           fi
           databricks bundle run maturity_ci_check \
             --target "$TARGET" \
-            $extra_var \
+            "${extra_args[@]}" \
             --params env="$TARGET" \
-            --params enforcement_mode="${{ inputs.maturity_enforcement_mode }}" \
-            --params maturity_override="${{ inputs.maturity_override }}"
+            --params enforcement_mode="$MATURITY_ENFORCEMENT_MODE_INPUT" \
+            --params maturity_override="$MATURITY_OVERRIDE_INPUT"
