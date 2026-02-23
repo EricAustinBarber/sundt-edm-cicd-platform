@@ -66,6 +66,15 @@ jobs:
           test -f README.md
           test -f docs/security-and-secrets.md
           test -f docs/branching-and-promotion.md
+
+  docs_quality_advisory:
+    name: docs-quality-advisory
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
       - name: Markdown lint
         continue-on-error: true
         uses: DavidAnson/markdownlint-cli2-action@v20
