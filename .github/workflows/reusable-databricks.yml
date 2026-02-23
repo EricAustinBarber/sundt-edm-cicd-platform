@@ -110,6 +110,71 @@ on:
         required: false
         default: false
         type: boolean
+      run_maturity_scorecard_status_load:
+        description: "If true, load scorecard check statuses after deploy (non-blocking)."
+        required: false
+        default: false
+        type: boolean
+      run_maturity_scorecard_eval:
+        description: "If true, evaluate scorecard results after deploy (non-blocking)."
+        required: false
+        default: false
+        type: boolean
+      run_maturity_scorecard_evidence_stub:
+        description: "If true, run evidence stub (dry-run by default) after deploy."
+        required: false
+        default: false
+        type: boolean
+      maturity_scorecard_status_job_key:
+        description: "Bundle job key for scorecard status loader."
+        required: false
+        default: "maturity_scorecard_status_load"
+        type: string
+      maturity_scorecard_eval_job_key:
+        description: "Bundle job key for scorecard evaluation."
+        required: false
+        default: "maturity_scorecard_eval"
+        type: string
+      maturity_scorecard_evidence_stub_job_key:
+        description: "Bundle job key for evidence stub."
+        required: false
+        default: "maturity_scorecard_evidence_stub"
+        type: string
+      maturity_scorecard_status_path:
+        description: "Override status CSV path used by the loader (optional)."
+        required: false
+        default: ""
+        type: string
+      maturity_scorecard_source:
+        description: "Scorecard source for evaluation (embedded|workspace_csv)."
+        required: false
+        default: ""
+        type: string
+      maturity_scorecard_path:
+        description: "Scorecard CSV path used when source=workspace_csv."
+        required: false
+        default: ""
+        type: string
+      maturity_scorecard_updated_by:
+        description: "Updated_by value for status loader."
+        required: false
+        default: "bundle"
+        type: string
+      maturity_scorecard_evidence_stub_write_mode:
+        description: "Write mode for evidence stub: dry_run|append."
+        required: false
+        default: "dry_run"
+        type: string
+      maturity_scorecard_evidence_stub_status_path:
+        description: "Optional status CSV path for evidence stub."
+        required: false
+        default: ""
+        type: string
+      maturity_scorecard_evidence_stub_updated_by:
+        description: "Updated_by value for evidence stub."
+        required: false
+        default: "evidence_stub"
+        type: string
       maturity_enforcement_mode:
         description: "Override enforcement mode for this run: off|warn|block. Empty means use config table."
         required: false
@@ -164,6 +229,16 @@ jobs:
       SMOKE_MODE_INPUT: ${{ inputs.smoke_mode }}
       MATURITY_OVERRIDE_INPUT: ${{ inputs.maturity_override }}
       MATURITY_ENFORCEMENT_MODE_INPUT: ${{ inputs.maturity_enforcement_mode }}
+      MATURITY_SCORECARD_STATUS_JOB_KEY_INPUT: ${{ inputs.maturity_scorecard_status_job_key }}
+      MATURITY_SCORECARD_EVAL_JOB_KEY_INPUT: ${{ inputs.maturity_scorecard_eval_job_key }}
+      MATURITY_SCORECARD_EVIDENCE_STUB_JOB_KEY_INPUT: ${{ inputs.maturity_scorecard_evidence_stub_job_key }}
+      MATURITY_SCORECARD_STATUS_PATH_INPUT: ${{ inputs.maturity_scorecard_status_path }}
+      MATURITY_SCORECARD_SOURCE_INPUT: ${{ inputs.maturity_scorecard_source }}
+      MATURITY_SCORECARD_PATH_INPUT: ${{ inputs.maturity_scorecard_path }}
+      MATURITY_SCORECARD_UPDATED_BY_INPUT: ${{ inputs.maturity_scorecard_updated_by }}
+      MATURITY_SCORECARD_EVIDENCE_STUB_WRITE_MODE_INPUT: ${{ inputs.maturity_scorecard_evidence_stub_write_mode }}
+      MATURITY_SCORECARD_EVIDENCE_STUB_STATUS_PATH_INPUT: ${{ inputs.maturity_scorecard_evidence_stub_status_path }}
+      MATURITY_SCORECARD_EVIDENCE_STUB_UPDATED_BY_INPUT: ${{ inputs.maturity_scorecard_evidence_stub_updated_by }}
       RUN_ASSET_VALIDATION_INPUT: ${{ inputs.run_asset_validation }}
       RUN_POST_DEPLOY_SMOKE_INPUT: ${{ inputs.run_post_deploy_smoke }}
       RUN_SQL_SMOKE_INPUT: ${{ inputs.run_sql_smoke }}
@@ -535,3 +610,63 @@ jobs:
             --params env="$TARGET" \
             --params enforcement_mode="$MATURITY_ENFORCEMENT_MODE_INPUT" \
             --params maturity_override="$MATURITY_OVERRIDE_INPUT"
+
+      - name: Maturity scorecard status load (bundle run)
+        if: ${{ inputs.run_maturity_scorecard_status_load }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$BUNDLE_PATH"
+          extra_args=()
+          if [ -n "${VALIDATION_CLUSTER_ID:-}" ]; then
+            extra_args+=(--var "validation_cluster_id=$VALIDATION_CLUSTER_ID")
+          fi
+          params=(--params env="$TARGET" --params updated_by="$MATURITY_SCORECARD_UPDATED_BY_INPUT")
+          if [ -n "$MATURITY_SCORECARD_STATUS_PATH_INPUT" ]; then
+            params+=(--params status_path="$MATURITY_SCORECARD_STATUS_PATH_INPUT")
+          fi
+          databricks bundle run "$MATURITY_SCORECARD_STATUS_JOB_KEY_INPUT" \
+            --target "$TARGET" \
+            "${extra_args[@]}" \
+            "${params[@]}"
+
+      - name: Maturity scorecard evaluation (bundle run)
+        if: ${{ inputs.run_maturity_scorecard_eval }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$BUNDLE_PATH"
+          extra_args=()
+          if [ -n "${VALIDATION_CLUSTER_ID:-}" ]; then
+            extra_args+=(--var "validation_cluster_id=$VALIDATION_CLUSTER_ID")
+          fi
+          params=(--params env="$TARGET" --params run_id="${GITHUB_RUN_ID}" --params commit_sha="${GITHUB_SHA}")
+          if [ -n "$MATURITY_SCORECARD_SOURCE_INPUT" ]; then
+            params+=(--params scorecard_source="$MATURITY_SCORECARD_SOURCE_INPUT")
+          fi
+          if [ -n "$MATURITY_SCORECARD_PATH_INPUT" ]; then
+            params+=(--params scorecard_path="$MATURITY_SCORECARD_PATH_INPUT")
+          fi
+          databricks bundle run "$MATURITY_SCORECARD_EVAL_JOB_KEY_INPUT" \
+            --target "$TARGET" \
+            "${extra_args[@]}" \
+            "${params[@]}"
+
+      - name: Maturity scorecard evidence stub (bundle run)
+        if: ${{ inputs.run_maturity_scorecard_evidence_stub }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$BUNDLE_PATH"
+          extra_args=()
+          if [ -n "${VALIDATION_CLUSTER_ID:-}" ]; then
+            extra_args+=(--var "validation_cluster_id=$VALIDATION_CLUSTER_ID")
+          fi
+          params=(--params env="$TARGET" --params write_mode="$MATURITY_SCORECARD_EVIDENCE_STUB_WRITE_MODE_INPUT" --params updated_by="$MATURITY_SCORECARD_EVIDENCE_STUB_UPDATED_BY_INPUT")
+          if [ -n "$MATURITY_SCORECARD_EVIDENCE_STUB_STATUS_PATH_INPUT" ]; then
+            params+=(--params status_source_path="$MATURITY_SCORECARD_EVIDENCE_STUB_STATUS_PATH_INPUT")
+          fi
+          databricks bundle run "$MATURITY_SCORECARD_EVIDENCE_STUB_JOB_KEY_INPUT" \
+            --target "$TARGET" \
+            "${extra_args[@]}" \
+            "${params[@]}"
