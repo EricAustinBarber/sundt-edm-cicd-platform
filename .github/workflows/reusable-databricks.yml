@@ -140,11 +140,6 @@ on:
         required: false
         default: "maturity_scorecard_evidence_stub"
         type: string
-      maturity_scorecard_status_path:
-        description: "Override status CSV path used by the loader (optional)."
-        required: false
-        default: ""
-        type: string
       maturity_scorecard_source:
         description: "Scorecard source for evaluation (embedded|workspace_csv)."
         required: false
@@ -232,7 +227,6 @@ jobs:
       MATURITY_SCORECARD_STATUS_JOB_KEY_INPUT: ${{ inputs.maturity_scorecard_status_job_key }}
       MATURITY_SCORECARD_EVAL_JOB_KEY_INPUT: ${{ inputs.maturity_scorecard_eval_job_key }}
       MATURITY_SCORECARD_EVIDENCE_STUB_JOB_KEY_INPUT: ${{ inputs.maturity_scorecard_evidence_stub_job_key }}
-      MATURITY_SCORECARD_STATUS_PATH_INPUT: ${{ inputs.maturity_scorecard_status_path }}
       MATURITY_SCORECARD_SOURCE_INPUT: ${{ inputs.maturity_scorecard_source }}
       MATURITY_SCORECARD_PATH_INPUT: ${{ inputs.maturity_scorecard_path }}
       MATURITY_SCORECARD_UPDATED_BY_INPUT: ${{ inputs.maturity_scorecard_updated_by }}
@@ -622,9 +616,6 @@ jobs:
             extra_args+=(--var "validation_cluster_id=$VALIDATION_CLUSTER_ID")
           fi
           params=(--params env="$TARGET" --params updated_by="$MATURITY_SCORECARD_UPDATED_BY_INPUT")
-          if [ -n "$MATURITY_SCORECARD_STATUS_PATH_INPUT" ]; then
-            params+=(--params status_path="$MATURITY_SCORECARD_STATUS_PATH_INPUT")
-          fi
           databricks bundle run "$MATURITY_SCORECARD_STATUS_JOB_KEY_INPUT" \
             --target "$TARGET" \
             "${extra_args[@]}" \
